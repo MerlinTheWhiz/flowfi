@@ -1,8 +1,9 @@
 /**
- * Integration tests for GET /v1/users/:publicKey/events.
+ * Integration tests for GET /v1/events.
  *
- * Verifies the current activity-history contract used by the frontend:
- * chronological ordering, stream ownership filter, and response shape.
+ * Verifies the activity-page contract: address filter, event-type filter,
+ * pagination via limit/offset, and the shape returned to the frontend
+ * (events, total, hasMore).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
@@ -11,10 +12,7 @@ const mocks = vi.hoisted(() => ({
   prisma: {
     streamEvent: {
       findMany: vi.fn(),
-    },
-    user: {
-      findUnique: vi.fn(),
-      create: vi.fn(),
+      count: vi.fn(),
     },
   },
   sseService: {
@@ -73,50 +71,79 @@ function makeEvent(overrides: Partial<Record<string, unknown>> = {}) {
     timestamp: 1700000000,
     metadata: null,
     createdAt: new Date(),
-    stream: {
-      id: 1,
-      sender: ADDR,
-      recipient: ADDR,
-    },
     ...overrides,
   };
 }
 
-describe('GET /v1/users/:publicKey/events', () => {
+describe('GET /v1/events', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('returns the user event history', async () => {
+  it('rejects requests missing the `address` query parameter', async () => {
+    const res = await request(app).get('/v1/events');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/address/i);
+    expect(mocks.prisma.streamEvent.findMany).not.toHaveBeenCalled();
+  });
+
+  it('returns the paged event list for the wallet', async () => {
     const events = [makeEvent({ id: 'a', timestamp: 3 }), makeEvent({ id: 'b', timestamp: 2 })];
     mocks.prisma.streamEvent.findMany.mockResolvedValueOnce(events);
+    mocks.prisma.streamEvent.count.mockResolvedValueOnce(5);
 
-    const res = await request(app).get(`/v1/users/${ADDR}/events`);
+    const res = await request(app).get(`/v1/events?address=${ADDR}&limit=2`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject([
-      { id: 'a', timestamp: 3, eventType: 'CREATED', streamId: 1, transactionHash: 'tx-hash' },
-      { id: 'b', timestamp: 2, eventType: 'CREATED', streamId: 1, transactionHash: 'tx-hash' },
-    ]);
-    expect(res.body[0].createdAt).toEqual(events[0]!.createdAt.toISOString());
-    expect(res.body[1].createdAt).toEqual(events[1]!.createdAt.toISOString());
+    expect(res.body.events).toHaveLength(2);
+    expect(res.body).toMatchObject({ total: 5, limit: 2, offset: 0, hasMore: true });
 
     const callArgs = mocks.prisma.streamEvent.findMany.mock.calls[0]![0] as {
       where: { stream: { OR: Array<{ sender?: string; recipient?: string }> } };
       orderBy: { timestamp: string };
-      include: { stream: boolean };
+      take: number;
+      skip: number;
     };
     expect(callArgs.where.stream.OR).toEqual([{ sender: ADDR }, { recipient: ADDR }]);
     expect(callArgs.orderBy).toEqual({ timestamp: 'desc' });
-    expect(callArgs.include).toEqual({ stream: true });
+    expect(callArgs.take).toBe(2);
+    expect(callArgs.skip).toBe(0);
   });
 
-  it('returns an empty list when the user has no events', async () => {
+  it('forwards a comma-separated type filter to Prisma', async () => {
     mocks.prisma.streamEvent.findMany.mockResolvedValueOnce([]);
+    mocks.prisma.streamEvent.count.mockResolvedValueOnce(0);
 
-    const res = await request(app).get(`/v1/users/${ADDR}/events`);
-
+    const res = await request(app).get(
+      `/v1/events?address=${ADDR}&type=PAUSED,RESUMED`,
+    );
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
+
+    const callArgs = mocks.prisma.streamEvent.findMany.mock.calls[0]![0] as {
+      where: { eventType: { in: string[] } };
+    };
+    expect(callArgs.where.eventType).toEqual({ in: ['PAUSED', 'RESUMED'] });
+  });
+
+  it('rejects a type filter when no values are valid', async () => {
+    const res = await request(app).get(`/v1/events?address=${ADDR}&type=BOGUS`);
+    expect(res.status).toBe(400);
+    expect(mocks.prisma.streamEvent.findMany).not.toHaveBeenCalled();
+  });
+
+  it('supports page-based pagination as a fallback for offset', async () => {
+    mocks.prisma.streamEvent.findMany.mockResolvedValueOnce([]);
+    mocks.prisma.streamEvent.count.mockResolvedValueOnce(100);
+
+    const res = await request(app).get(
+      `/v1/events?address=${ADDR}&limit=10&page=4`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.offset).toBe(30);
+
+    const callArgs = mocks.prisma.streamEvent.findMany.mock.calls[0]![0] as {
+      skip: number;
+    };
+    expect(callArgs.skip).toBe(30);
   });
 });
