@@ -10,7 +10,6 @@ import {
   resumeStream,
   withdrawStream,
 } from '../../controllers/stream.controller.js';
-import { requireAuth } from '../../middleware/auth.js';
 import { authMiddleware } from '../../middleware/auth.middleware.js';
 import { streamCreationRateLimiter } from '../../middleware/stream-rate-limiter.middleware.js';
 
@@ -347,7 +346,7 @@ router.get('/:streamId/claimable', getStreamClaimableAmount);
  *       409:
  *         description: Conflict - stream already paused or inactive
  */
-router.post('/:streamId/pause', requireAuth, pauseStream);
+router.post('/:streamId/pause', authMiddleware, pauseStream);
 
 /**
  * @openapi
@@ -393,7 +392,7 @@ router.post('/:streamId/pause', requireAuth, pauseStream);
  *       409:
  *         description: Conflict - stream not paused or inactive
  */
-router.post('/:streamId/resume', requireAuth, resumeStream);
+router.post('/:streamId/resume', authMiddleware, resumeStream);
 
 /**
  * @openapi
@@ -424,6 +423,6 @@ router.post('/:streamId/resume', requireAuth, resumeStream);
  *       409:
  *         description: Conflict - no claimable balance available
  */
-router.post('/:streamId/withdraw', requireAuth, withdrawStream);
+router.post('/:streamId/withdraw', authMiddleware, withdrawStream);
 
 export default router;
